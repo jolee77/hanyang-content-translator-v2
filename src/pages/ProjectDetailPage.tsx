@@ -33,6 +33,7 @@ export function ProjectDetailPage() {
   const [pptxFile, setPptxFile] = useState<File | null>(null)
   const [manuscriptFile, setManuscriptFile] = useState<File | null>(null)
   const [isDraggingPptx, setIsDraggingPptx] = useState(false)
+  const [isDraggingManuscript, setIsDraggingManuscript] = useState(false)
   const [editingGuidelines, setEditingGuidelines] = useState(false)
   const [guidelinesDraft, setGuidelinesDraft] = useState('')
 
@@ -42,6 +43,14 @@ export function ProjectDetailPage() {
       return
     }
     setPptxFile(file)
+  }
+
+  const handleManuscriptFile = (file: File) => {
+    if (!isManuscriptFile(file)) {
+      showToast(MANUSCRIPT_UNSUPPORTED_MSG, 'error')
+      return
+    }
+    setManuscriptFile(file)
   }
 
   const handleAddStoryboard = async (e: FormEvent) => {
@@ -246,7 +255,26 @@ export function ProjectDetailPage() {
             </div>
             <div>
               <label className="nb-field-label">원고 (대본)</label>
-              <div className={manuscriptFile ? 'nb-dropzone nb-dropzone--ready' : 'nb-dropzone'}>
+              <div
+                onDragOver={(e) => {
+                  e.preventDefault()
+                  setIsDraggingManuscript(true)
+                }}
+                onDragLeave={() => setIsDraggingManuscript(false)}
+                onDrop={(e: DragEvent<HTMLDivElement>) => {
+                  e.preventDefault()
+                  setIsDraggingManuscript(false)
+                  const file = e.dataTransfer.files[0]
+                  if (file) handleManuscriptFile(file)
+                }}
+                className={
+                  isDraggingManuscript
+                    ? 'nb-dropzone nb-dropzone--active'
+                    : manuscriptFile
+                      ? 'nb-dropzone nb-dropzone--ready'
+                      : 'nb-dropzone'
+                }
+              >
                 {manuscriptFile ? (
                   <>
                     <p className="text-sm font-medium text-gray-900">{manuscriptFile.name}</p>
@@ -260,7 +288,9 @@ export function ProjectDetailPage() {
                   </>
                 ) : (
                   <>
-                    <p className="text-sm text-gray-600">{MANUSCRIPT_FORMAT_LABEL} 원고</p>
+                    <p className="text-sm text-gray-600">
+                      {MANUSCRIPT_FORMAT_LABEL} 원고를 드래그하거나
+                    </p>
                     <label className="nb-btn-secondary mt-2 cursor-pointer">
                       원고 선택
                       <input
@@ -269,12 +299,7 @@ export function ProjectDetailPage() {
                         className="hidden"
                         onChange={(e) => {
                           const file = e.target.files?.[0]
-                          if (!file) return
-                          if (!isManuscriptFile(file)) {
-                            showToast(MANUSCRIPT_UNSUPPORTED_MSG, 'error')
-                            return
-                          }
-                          setManuscriptFile(file)
+                          if (file) handleManuscriptFile(file)
                         }}
                       />
                     </label>
