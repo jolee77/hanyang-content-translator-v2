@@ -21,8 +21,8 @@ npm install
 cp .env.example .env
 # .env에 Supabase URL·anon key 입력 후 dev 서버 재시작
 
-VITE_SUPABASE_URL=your_supabase_url
-VITE_SUPABASE_ANON_KEY=your_anon_key
+VITE_SUPABASE_URL=https://qliwoporrrxjykrfuewg.supabase.co
+VITE_SUPABASE_ANON_KEY=<dashboard anon key>
 
 # 개발 서버
 npm run dev
@@ -52,10 +52,29 @@ npm run build
 3. **전문가 검증** — 토큰 링크 공유
 4. **완료** — 영문 화면 PPTX / 엑셀 다운로드
 
-## 배포
+## 배포·인프라
 
-- 프로덕션: [sb-translator-v2.vercel.app](https://sb-translator-v2.vercel.app)
-- Supabase (v2 전용): `hanyang-content-translator-v2` (`qliwoporrrxjykrfuewg`)
-- Auth Redirect URL에 `https://sb-translator-v2.vercel.app/**`, `http://localhost:5173/**` 등록 필요
+| 항목 | URL / 값 |
+|------|----------|
+| 프로덕션 | https://sb-translator-v2.vercel.app |
+| GitHub | https://github.com/jolee77/hanyang-content-translator-v2 |
+| Supabase (v2 전용) | `hanyang-content-translator-v2` (`qliwoporrrxjykrfuewg`) |
 
-상세 스펙은 [CLAUDE.md](./CLAUDE.md)를 참고하세요.
+- Auth Redirect URL: `https://sb-translator-v2.vercel.app/**`, `http://localhost:5173/**`
+- v1 Supabase와 **분리됨** (공유하지 않음)
+
+## 최근 업데이트 (2026-07-08)
+
+- UI 시스템명: **한양대 콘텐츠 번역기**
+- 프로젝트·스토리보드 계층, 원고 정합성, 멀티 AI API
+- 목표 언어는 프로젝트 생성 시에만 선택
+- v2 전용 Supabase 생성·마이그레이션·함수 배포 완료
+- Git 저장소 초기화 및 `main` 푸시 완료
+
+### 다음에 할 일 (요약)
+1. Supabase Auth Redirect URL 등록
+2. Storage 버킷 `pptx-files` / 관리자 계정·API 키 등록
+3. Vercel ↔ GitHub 저장소 연결 (자동 배포)
+4. Phase 2: 영상 나레이션 → 중국어 번역
+
+상세 스펙·TODO: [CLAUDE.md](./CLAUDE.md)

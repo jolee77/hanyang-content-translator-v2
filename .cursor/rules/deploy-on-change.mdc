@@ -10,15 +10,17 @@ alwaysApply: true
 ## 필수 절차
 
 1. `npm run build`로 빌드 오류 없음 확인 (가능하면)
-2. 관련 변경만 스테이징 (`.env`, 시크릿, `scripts/tmp/` 제외)
+2. 관련 변경만 스테이징 (`.env`, 시크릿, `scripts/tmp/`, `lib/` 샘플, `supabase/.temp` 제외)
 3. `git commit` — 변경 이유 중심의 메시지
-4. `git push origin main` — Vercel 자동 배포 트리거
+4. `git push origin main` — (GitHub 연결 후) Vercel 자동 배포 트리거  
+   - GitHub 미연결 시: `npx vercel deploy --prod --yes`로 수동 배포
 5. 완료 후 사용자에게 커밋 해시와 배포 URL 안내
 
 ## 배포 환경
 
-- **프로덕션:** `main` 브랜치 → [elearning-translator.vercel.app](https://elearning-translator.vercel.app)
-- **원격:** `https://github.com/jolee77/elearning_translator.git`
+- **프로덕션:** `main` 브랜치 → [sb-translator-v2.vercel.app](https://sb-translator-v2.vercel.app)
+- **원격:** `https://github.com/jolee77/hanyang-content-translator-v2.git`
+- **Supabase:** `hanyang-content-translator-v2` (`qliwoporrrxjykrfuewg`) — v1과 분리
 
 ## 예외
 
@@ -28,4 +30,4 @@ alwaysApply: true
 
 ## 문서 동기화
 
-기능/파서 동작을 바꿨으면 같은 커밋에 `README.md` 또는 `CLAUDE.md`도 함께 갱신한다.
+기능/파서/인프라(배포 URL·Supabase)를 바꿨으면 같은 커밋에 `README.md` 또는 `CLAUDE.md`도 함께 갱신한다.
