@@ -6,7 +6,12 @@ import { useToast } from '../hooks/ToastProvider'
 import { useProject, useUpdateProject } from '../hooks/useProject'
 import { useCreateStoryboard, useStoryboards } from '../hooks/useStoryboard'
 import { LANG_CONFIG } from '../lib/lang'
-import { isManuscriptFile } from '../lib/manuscriptParser'
+import {
+  isManuscriptFile,
+  MANUSCRIPT_ACCEPT,
+  MANUSCRIPT_FORMAT_LABEL,
+  MANUSCRIPT_UNSUPPORTED_MSG,
+} from '../lib/manuscriptParser'
 
 function isPptxFile(file: File): boolean {
   return (
@@ -255,18 +260,18 @@ export function ProjectDetailPage() {
                   </>
                 ) : (
                   <>
-                    <p className="text-sm text-gray-600">TXT 또는 DOCX 원고</p>
+                    <p className="text-sm text-gray-600">{MANUSCRIPT_FORMAT_LABEL} 원고</p>
                     <label className="nb-btn-secondary mt-2 cursor-pointer">
                       원고 선택
                       <input
                         type="file"
-                        accept=".txt,.docx"
+                        accept={MANUSCRIPT_ACCEPT}
                         className="hidden"
                         onChange={(e) => {
                           const file = e.target.files?.[0]
                           if (!file) return
                           if (!isManuscriptFile(file)) {
-                            showToast('원고는 TXT 또는 DOCX만 업로드할 수 있습니다.', 'error')
+                            showToast(MANUSCRIPT_UNSUPPORTED_MSG, 'error')
                             return
                           }
                           setManuscriptFile(file)

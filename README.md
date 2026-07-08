@@ -47,7 +47,7 @@ npm run build
 
 ## 워크플로 (스토리보드)
 
-1. **화면 텍스트 추출** — PPTX 파싱 + 원고(TXT/DOCX) 정합성 검증
+1. **화면 텍스트 추출** — PPTX 파싱 + 원고(TXT/DOCX/PDF/PPT/PPTX) 정합성 검증
 2. **맞춤법·번역·역번역** — AI 일괄 처리 (`project.target_lang`)
 3. **전문가 검증** — 토큰 링크 공유
 4. **완료** — 영문 화면 PPTX / 엑셀 다운로드

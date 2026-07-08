@@ -84,7 +84,7 @@ VITE_SUPABASE_ANON_KEY=<Supabase Dashboard → API → anon key>
 ### Storage
 - 버킷: `pptx-files`
 - PPTX: `{userId}/{projectId}/{storyboardId}/source.pptx`
-- 원고: `{userId}/{projectId}/{storyboardId}/manuscript.{txt|docx}`
+- 원고: `{userId}/{projectId}/{storyboardId}/manuscript.{txt|docx|pdf|ppt|pptx}`
 
 ## 스토리보드 status 흐름
 ```
@@ -116,7 +116,7 @@ UI는 **4단계**로 통합 (`src/lib/storyboardStatus.ts`):
 ```
 
 ## 원고(대본) 정합성
-- 스토리보드 추가 시 **PPTX + 원고(TXT/DOCX)** 필수 업로드
+- 스토리보드 추가 시 **PPTX + 원고(TXT/DOCX/PDF/PPT/PPTX)** 필수 업로드
 - `src/lib/manuscriptParser.ts` — 텍스트 추출
 - `src/lib/manuscriptConsistency.ts` — 화면 텍스트와 원고 비교
 - Step1 UI에서 일치/불일치 건수·목록 표시

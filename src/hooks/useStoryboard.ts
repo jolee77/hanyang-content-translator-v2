@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { extractManuscriptText, getManuscriptExtension } from '../lib/manuscriptParser'
+import { extractManuscriptText, getManuscriptContentType, getManuscriptExtension } from '../lib/manuscriptParser'
 import { supabase } from '../lib/supabase'
 import type { Storyboard, StoryboardStatus } from '../types'
 import { useAuth } from './useAuth'
@@ -65,7 +65,7 @@ export function useCreateStoryboard() {
       const manuscriptText = await extractManuscriptText(input.manuscriptFile)
       const manuscriptExt = getManuscriptExtension(input.manuscriptFile.name)
       if (!manuscriptExt) {
-        throw new Error('원고는 TXT 또는 DOCX 파일만 지원합니다.')
+        throw new Error('원고는 TXT, DOCX, PDF, PPT, PPTX 파일만 지원합니다.')
       }
 
       const { data: existing } = await supabase
@@ -112,9 +112,7 @@ export function useCreateStoryboard() {
         throw pptxUploadError
       }
 
-      const manuscriptContentType = manuscriptExt === '.docx'
-        ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-        : 'text/plain'
+      const manuscriptContentType = getManuscriptContentType(manuscriptExt)
 
       const { error: manuscriptUploadError } = await supabase.storage
         .from(STORAGE_BUCKET)
