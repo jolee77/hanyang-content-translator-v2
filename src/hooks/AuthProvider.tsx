@@ -1,0 +1,147 @@
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from 'react'
+import type { Session, User } from '@supabase/supabase-js'
+import { formatAuthError } from '../lib/authErrors'
+import { supabase } from '../lib/supabase'
+import type { Profile } from '../types'
+import { AuthContext } from './useAuth'
+
+async function fetchProfile(userId: string): Promise<Profile | null> {
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('*')
+    .eq('id', userId)
+    .single()
+
+  if (error) {
+    console.error('프로필 조회 실패:', error.message)
+    return null
+  }
+
+  return data
+}
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [user, setUser] = useState<User | null>(null)
+  const [profile, setProfile] = useState<Profile | null>(null)
+  const [session, setSession] = useState<Session | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  const loadProfile = useCallback(async (userId: string) => {
+    const profileData = await fetchProfile(userId)
+    setProfile(profileData)
+  }, [])
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session: currentSession } }) => {
+      setSession(currentSession)
+      setUser(currentSession?.user ?? null)
+
+      if (currentSession?.user) {
+        loadProfile(currentSession.user.id).finally(() => setLoading(false))
+      } else {
+        setLoading(false)
+      }
+    })
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession)
+      setUser(nextSession?.user ?? null)
+
+      if (nextSession?.user) {
+        // Supabase: onAuthStateChange 콜백에서 await 사용 시 데드락 가능
+        window.setTimeout(() => {
+          void loadProfile(nextSession.user!.id)
+        }, 0)
+      } else {
+        setProfile(null)
+      }
+    })
+
+    return () => subscription.unsubscribe()
+  }, [loadProfile])
+
+  const signIn = useCallback(
+    async (email: string, password: string) => {
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password })
+
+      if (error) {
+        return { error: formatAuthError(error.message), session: null }
+      }
+
+      if (data.session) {
+        setSession(data.session)
+        setUser(data.session.user)
+        await loadProfile(data.session.user.id)
+        return { error: null, session: data.session }
+      }
+
+      const { data: sessionData } = await supabase.auth.getSession()
+      if (sessionData.session) {
+        setSession(sessionData.session)
+        setUser(sessionData.session.user)
+        await loadProfile(sessionData.session.user.id)
+        return { error: null, session: sessionData.session }
+      }
+
+      return {
+        error: '로그인 세션을 저장하지 못했습니다. 브라우저 저장소(쿠키/로컬 스토리지)를 확인해 주세요.',
+        session: null,
+      }
+    },
+    [loadProfile],
+  )
+
+  const signUp = useCallback(
+    async (email: string, password: string, name: string) => {
+      const { data, error } = await supabase.auth.signUp({ email, password })
+
+      if (error) {
+        return { error: error.message }
+      }
+
+      if (data.user) {
+        const { error: profileError } = await supabase.from('profiles').insert({
+          id: data.user.id,
+          email,
+          name,
+          role: 'designer',
+        })
+
+        if (profileError) {
+          return { error: profileError.message }
+        }
+      }
+
+      return { error: null }
+    },
+    [],
+  )
+
+  const signOut = useCallback(async () => {
+    await supabase.auth.signOut()
+    setProfile(null)
+  }, [])
+
+  const value = useMemo(
+    () => ({
+      user,
+      profile,
+      session,
+      loading,
+      signIn,
+      signUp,
+      signOut,
+    }),
+    [user, profile, session, loading, signIn, signUp, signOut],
+  )
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+}

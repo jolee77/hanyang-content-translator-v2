@@ -1,0 +1,257 @@
+import { serve } from 'https://deno.land/std@0.224.0/http/server.ts'
+import {
+  authenticateRequest,
+  updateProjectStatus,
+  updateStoryboardStatus,
+  verifyProjectAccess,
+  verifyStoryboardAccess,
+} from '../_shared/auth.ts'
+import { getAiConfig, callAiJson } from '../_shared/ai.ts'
+import { handleCors } from '../_shared/cors.ts'
+import { HttpError, chunk, errorResponse, jsonResponse, parseJsonBody } from '../_shared/http.ts'
+
+const BATCH_SIZE = 4
+
+interface VerifyRequest {
+  project_id: string
+  storyboard_id?: string
+  translation_ids?: string[]
+  reset_results?: boolean
+  finalize?: boolean
+}
+
+interface TranslationRow {
+  id: string
+  project_id: string
+  slide_id: string
+  field: string
+  source: string
+  vi_text: string
+}
+
+interface VerifyItemResult {
+  translation_id: string
+  back_translation: string
+  similarity_score: number
+  issues: string | null
+}
+
+interface VerifyBatchResponse {
+  results: VerifyItemResult[]
+}
+
+type VerifyInsertRow = {
+  project_id: string
+  slide_id: string
+  translation_id: string
+  back_translation: string
+  score: number | null
+  issues: string | null
+  apply_status: string
+}
+
+function findVerifyResult(
+  results: VerifyItemResult[] | undefined,
+  translationId: string,
+): VerifyItemResult | undefined {
+  if (!results?.length) return undefined
+  return results.find((item) => item.translation_id === translationId)
+}
+
+function mergeVerifyRows(
+  projectId: string,
+  batch: TranslationRow[],
+  response: VerifyBatchResponse,
+): VerifyInsertRow[] {
+  const rows: VerifyInsertRow[] = []
+
+  for (const translation of batch) {
+    const item = findVerifyResult(response.results, translation.id)
+    const backTranslation = item?.back_translation?.trim()
+    if (!backTranslation) continue
+
+    rows.push({
+      project_id: projectId,
+      slide_id: translation.slide_id,
+      translation_id: translation.id,
+      back_translation: backTranslation,
+      score: item?.similarity_score ?? null,
+      issues: item?.issues ?? null,
+      apply_status: 'pending',
+    })
+  }
+
+  return rows
+}
+
+const SYSTEM_PROMPT = `당신은 번역 품질 검증 전문가입니다.
+외국어 번역문을 한국어로 역번역(back-translation)하고, 원문과 비교하여 품질을 평가합니다.
+
+규칙:
+- 역번역은 자연스러운 한국어로 작성합니다.
+- 화면텍스트(screen_text)는 UI에 표시되는 짧은 문구이므로 간결하게 역번역합니다.
+- 나레이션(tr_narration)은 구두 발화에 맞게 자연스럽게 역번역합니다.
+- similarity_score는 0~100 정수 (100이 완벽 일치).
+- 의미 누락, 오역, 어색한 표현이 있으면 issues에 한국어로 설명합니다.
+- 문제가 없으면 issues는 null로 둡니다.
+- 입력의 모든 translation_id에 대해 results를 반드시 포함합니다.
+- 반드시 요청된 JSON 형식만 출력합니다.`
+
+function buildVerifyPrompt(items: TranslationRow[]): string {
+  const payload = items.map((item) => ({
+    translation_id: item.id,
+    field_key: item.field,
+    ko_text: item.source,
+    translated_text: item.vi_text,
+  }))
+
+  return `다음 번역 항목(화면텍스트·나레이션)에 대해 역번역 검증을 수행하세요.
+
+입력:
+${JSON.stringify(payload, null, 2)}
+
+각 항목에 대해 translated_text를 한국어로 역번역하고 ko_text와 비교하세요.
+입력에 포함된 모든 translation_id에 대해 results 항목을 빠짐없이 반환하세요.
+
+다음 JSON 형식으로만 응답하세요:
+{
+  "results": [
+    {
+      "translation_id": "번역 UUID",
+      "back_translation": "역번역 한국어",
+      "similarity_score": 95,
+      "issues": "문제 설명 또는 null"
+    }
+  ]
+}`
+}
+
+serve(async (req) => {
+  const cors = handleCors(req)
+  if (cors) return cors
+
+  if (req.method !== 'POST') {
+    return jsonResponse({ error: 'POST 메서드만 지원합니다.' }, 405)
+  }
+
+  try {
+    const { user, serviceClient } = await authenticateRequest(req)
+    const body = await parseJsonBody<VerifyRequest>(req)
+
+    if (!body.project_id) {
+      throw new HttpError(400, 'project_id가 필요합니다.')
+    }
+
+    await verifyProjectAccess(serviceClient, user.id, body.project_id)
+    if (body.storyboard_id) {
+      await verifyStoryboardAccess(serviceClient, user.id, body.storyboard_id)
+    }
+
+    const aiConfig = await getAiConfig(serviceClient)
+    const shouldFinalize = body.finalize !== false
+
+    if (body.reset_results || shouldFinalize) {
+      await updateProjectStatus(serviceClient, body.project_id, 'verifying')
+      if (body.storyboard_id) {
+        await updateStoryboardStatus(serviceClient, body.storyboard_id, 'verifying')
+      }
+    }
+
+    let query = serviceClient
+      .from('translations')
+      .select('id, project_id, slide_id, field, source, vi_text')
+      .eq('project_id', body.project_id)
+      .not('vi_text', 'is', null)
+      .neq('vi_text', '')
+
+    if (body.translation_ids?.length) {
+      query = query.in('id', body.translation_ids)
+    }
+
+    const { data: translations, error: translationsError } = await query
+
+    if (translationsError) {
+      throw new HttpError(500, `번역 조회 실패: ${translationsError.message}`)
+    }
+
+    const translationRows = (translations ?? []) as TranslationRow[]
+
+    if (translationRows.length === 0) {
+      throw new HttpError(404, '검증할 번역이 없습니다.')
+    }
+
+    const rowsToInsert: VerifyInsertRow[] = []
+
+    for (const batch of chunk(translationRows, BATCH_SIZE)) {
+      const response = await callAiJson<VerifyBatchResponse>(
+        aiConfig,
+        SYSTEM_PROMPT,
+        buildVerifyPrompt(batch),
+      )
+
+      rowsToInsert.push(...mergeVerifyRows(body.project_id, batch, response))
+    }
+
+    if (rowsToInsert.length === 0) {
+      throw new HttpError(
+        502,
+        'AI 역번역 검증 결과를 파싱하지 못했습니다. 잠시 후 다시 시도해 주세요.',
+      )
+    }
+
+    const translationIds = translationRows.map((row) => row.id)
+
+    if (body.reset_results) {
+      const { error: resetError } = await serviceClient
+        .from('verifications')
+        .delete()
+        .eq('project_id', body.project_id)
+
+      if (resetError) {
+        throw new HttpError(500, `기존 검증 결과 삭제 실패: ${resetError.message}`)
+      }
+    } else {
+      const { error: deleteError } = await serviceClient
+        .from('verifications')
+        .delete()
+        .eq('project_id', body.project_id)
+        .in('translation_id', translationIds)
+
+      if (deleteError) {
+        throw new HttpError(500, `기존 검증 결과 삭제 실패: ${deleteError.message}`)
+      }
+    }
+
+    if (rowsToInsert.length > 0) {
+      const { error: insertError } = await serviceClient
+        .from('verifications')
+        .insert(rowsToInsert)
+
+      if (insertError) {
+        throw new HttpError(500, `검증 결과 저장 실패: ${insertError.message}`)
+      }
+    }
+
+    if (shouldFinalize) {
+      await updateProjectStatus(serviceClient, body.project_id, 'verified')
+      if (body.storyboard_id) {
+        await updateStoryboardStatus(serviceClient, body.storyboard_id, 'verified')
+      }
+
+      await serviceClient.from('change_logs').insert({
+        project_id: body.project_id,
+        user_id: user.id,
+        action: 'verification_applied',
+        detail: `${rowsToInsert.length}건 역번역 검증 완료`,
+      })
+    }
+
+    return jsonResponse({
+      success: true,
+      project_id: body.project_id,
+      verified_count: rowsToInsert.length,
+    })
+  } catch (error) {
+    return errorResponse(error)
+  }
+})
