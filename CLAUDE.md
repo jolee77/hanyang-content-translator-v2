@@ -183,6 +183,8 @@ const KO_CPM = 320
 | `20250708120000_v2_storyboards_multi_api.sql` | storyboards, guidelines, multi-API |
 | `20250708140000_storyboard_expert_review.sql` | expert_reviews.storyboard_id + RPC |
 | `20250708150000_storyboard_manuscript.sql` | 원고 컬럼 |
+| `20250709100000_storage_pptx_bucket.sql` | `pptx-files` 버킷 + Storage RLS |
+| `20250709100100_auth_user_trigger.sql` | `auth.users` → `profiles` 트리거 |
 
 ## 구현 현황 (2026-07-08)
 
@@ -201,13 +203,28 @@ const KO_CPM = 320
 ### 내일·이후 TODO
 | 우선순위 | 항목 | 설명 |
 |---------|------|------|
-| 높음 | 최초 관리자 계정 / Storage 버킷 | 새 Supabase에 `pptx-files` 버킷·사용자·API 키 등록 확인 |
-| 높음 | Auth Redirect URL | Supabase에 Vercel/로컬 URL 등록 |
-| 중 | Vercel↔GitHub 연결 | `vercel git connect` 실패함 — 대시보드에서 저장소 연결 후 자동배포 확보 |
-| 중 | Storage 정책 / RLS 스모크 | PPTX·원고 업로드 경로 실제 업로드 테스트 |
+| ~~높음~~ | ~~Storage 버킷~~ | `20250709100000_storage_pptx_bucket.sql` 적용 완료 |
+| ~~높음~~ | ~~Auth Redirect URL~~ | `supabase/config.toml` + `config push` 완료 |
+| ~~높음~~ | ~~최초 관리자~~ | `bootstrap-admin` Edge Function으로 1회 생성 (이후 409) |
+| 중 | Vercel↔GitHub 연결 | CLI `vercel git connect` 실패 — Vercel 대시보드에서 수동 연결 |
+| 중 | Storage / 업로드 스모크 | 실제 PPTX·원고 업로드 E2E 테스트 |
+| 중 | 관리자 API 키 등록 | `/admin/settings`에서 AI 제공자·키 설정 |
 | 낮음 | Phase 2 | 영상 기반 전문가 나레이션 추출 → 중국어 번역 |
 | 낮음 | 공통 UI 리팩터 | Button, Card, Badge 등 |
 | 낮음 | 레거시 v1 Step 컴포넌트 | `src/components/project/*` (`@ts-nocheck`) 정리 |
+
+## 최초 관리자 부트스트랩 (1회)
+
+1. Supabase Secrets: `BOOTSTRAP_SECRET` 설정
+2. `bootstrap-admin` 함수 배포
+3. POST `/functions/v1/bootstrap-admin` — body: `{ email, name, password, secret }`
+4. 관리자가 1명 생기면 동일 API는 409 반환 (재실행 불가)
+5. 로그인 후 비밀번호 변경 권장
+
+## Supabase config.toml
+
+`supabase/config.toml` — Auth `site_url`, `additional_redirect_urls`  
+변경 후: `npx supabase config push --yes`
 
 ## 폴더 구조 (핵심)
 ```

@@ -72,9 +72,11 @@ npm run build
 - Git 저장소 초기화 및 `main` 푸시 완료
 
 ### 다음에 할 일 (요약)
-1. Supabase Auth Redirect URL 등록
-2. Storage 버킷 `pptx-files` / 관리자 계정·API 키 등록
-3. Vercel ↔ GitHub 저장소 연결 (자동 배포)
-4. Phase 2: 영상 나레이션 → 중국어 번역
+1. ~~Supabase Auth Redirect URL~~ — 완료 (`config push`)
+2. ~~Storage `pptx-files`~~ — 완료 (마이그레이션)
+3. ~~최초 관리자~~ — `bootstrap-admin` 1회 실행 완료
+4. **관리자 → API 설정**에서 AI 제공자·API 키 등록
+5. Vercel ↔ GitHub 저장소 연결 (대시보드 수동)
+6. PPTX·원고 업로드 E2E 스모크 테스트
 
 상세 스펙·TODO: [CLAUDE.md](./CLAUDE.md)

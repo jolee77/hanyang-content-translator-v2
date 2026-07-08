@@ -1,0 +1,12 @@
+# Supabase 로컬/원격 공통 설정 (config push 대상)
+# https://supabase.com/docs/guides/cli/config
+
+project_id = "qliwoporrrxjykrfuewg"
+
+[auth]
+site_url = "https://sb-translator-v2.vercel.app"
+additional_redirect_urls = [
+  "https://sb-translator-v2.vercel.app/**",
+  "http://localhost:5173/**",
+  "http://127.0.0.1:5173/**",
+]
