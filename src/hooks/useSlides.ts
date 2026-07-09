@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { parsePptx, normalizeScreenText, type ParseProgress, type ParsedSlide } from '../lib/pptxParser'
+import { parsePptx, parseSingleSlide, normalizeScreenText, type ParseProgress, type ParsedSlide } from '../lib/pptxParser'
 import { supabase } from '../lib/supabase'
 import type { Slide } from '../types'
 import { STORAGE_BUCKET } from './useProject'
@@ -19,6 +19,8 @@ function normalizeSlide(slide: Slide): Slide {
   return {
     ...slide,
     screen_text: normalizeScreenText(slide.screen_text),
+    extraction_status: slide.extraction_status ?? 'ok',
+    extraction_error: slide.extraction_error ?? null,
   }
 }
 
@@ -29,6 +31,30 @@ function normalizeSlides(slides: Slide[]): Slide[] {
 function serializeScreenTextForDb(boxes: Slide['screen_text']): string | null {
   if (!boxes?.length) return null
   return JSON.stringify(boxes)
+}
+
+function isMissingExtractionColumnError(error: unknown): boolean {
+  const msg =
+    error && typeof error === 'object' && 'message' in error
+      ? String((error as { message: string }).message)
+      : String(error ?? '')
+  return /extraction_status|extraction_error|schema cache/i.test(msg)
+}
+
+function withoutExtractionMeta(row: SlideInsert): Record<string, unknown> {
+  const { extraction_status: _s, extraction_error: _e, ...rest } = row
+  return rest
+}
+
+async function insertSlideBatch(batch: SlideInsert[]) {
+  const first = await supabase.from('slides').insert(batch).select()
+  if (!first.error) return first
+
+  if (isMissingExtractionColumnError(first.error)) {
+    return supabase.from('slides').insert(batch.map(withoutExtractionMeta)).select()
+  }
+
+  return first
 }
 
 export function useSlides(storyboardId: string | undefined) {
@@ -54,8 +80,8 @@ async function downloadPptx(storagePath: string): Promise<ArrayBuffer> {
   return data.arrayBuffer()
 }
 
-/** v2: 화면 텍스트만 저장 */
-function toScreenTextOnlySlideRows(
+/** 화면 텍스트 + 나레이션 저장 (화면설명·이미지번호 제외) */
+function toExtractedSlideRows(
   projectId: string,
   storyboardId: string,
   parsed: ParsedSlide[],
@@ -72,8 +98,26 @@ function toScreenTextOnlySlideRows(
     screen_text: serializeScreenTextForDb(slide.screen_text) as unknown as SlideInsert['screen_text'],
     screen_desc: null,
     image_nums: null,
-    narration: null,
+    narration: slide.narration,
+    extraction_status: slide.extraction_status,
+    extraction_error: slide.extraction_error,
   }))
+}
+
+function parsedToSlideUpdate(parsed: ParsedSlide): SlideUpdate {
+  return {
+    slide_type: parsed.slide_type,
+    screen_num: parsed.screen_num,
+    course_name: parsed.course_name,
+    chapter_name: parsed.chapter_name,
+    current_section: parsed.current_section,
+    screen_text: parsed.screen_text,
+    screen_desc: null,
+    image_nums: null,
+    narration: parsed.narration,
+    extraction_status: parsed.extraction_status,
+    extraction_error: parsed.extraction_error,
+  }
 }
 
 async function insertSlideRows(
@@ -85,10 +129,10 @@ async function insertSlideRows(
 
   for (let i = 0; i < rows.length; i += INSERT_BATCH_SIZE) {
     const batch = rows.slice(i, i + INSERT_BATCH_SIZE)
-    const { data, error } = await supabase.from('slides').insert(batch).select()
+    const { data, error } = await insertSlideBatch(batch)
 
     if (error) throw error
-    inserted.push(...normalizeSlides(data))
+    inserted.push(...normalizeSlides(data ?? []))
 
     onProgress?.({
       current: Math.min(i + batch.length, total),
@@ -119,7 +163,11 @@ export function useExtractSlides() {
     }): Promise<Slide[]> => {
       const buffer = await downloadPptx(storagePath)
       const parsed = await parsePptx(buffer, onProgress)
-      const rows = toScreenTextOnlySlideRows(projectId, storyboardId, parsed)
+      const rows = toExtractedSlideRows(projectId, storyboardId, parsed)
+
+      if (rows.length === 0) {
+        throw new Error('PPTX에서 슬라이드를 추출하지 못했습니다.')
+      }
 
       const { error: deleteError } = await supabase
         .from('slides')
@@ -127,8 +175,6 @@ export function useExtractSlides() {
         .eq('storyboard_id', storyboardId)
 
       if (deleteError) throw deleteError
-
-      if (rows.length === 0) return []
 
       return insertSlideRows(rows, onProgress)
     },
@@ -139,11 +185,58 @@ export function useExtractSlides() {
 }
 
 function prepareSlideUpdateForDb(updates: SlideUpdate): Record<string, unknown> {
-  if (updates.screen_text === undefined) return updates
-  return {
-    ...updates,
-    screen_text: serializeScreenTextForDb(updates.screen_text ?? null),
+  const prepared: Record<string, unknown> =
+    updates.screen_text === undefined
+      ? { ...updates }
+      : {
+          ...updates,
+          screen_text: serializeScreenTextForDb(updates.screen_text ?? null),
+        }
+  return prepared
+}
+
+async function updateSlideRow(id: string, updates: Record<string, unknown>) {
+  const first = await supabase.from('slides').update(updates).eq('id', id).select().single()
+  if (!first.error) return first
+
+  if (isMissingExtractionColumnError(first.error)) {
+    const { extraction_status: _s, extraction_error: _e, ...rest } = updates
+    return supabase.from('slides').update(rest).eq('id', id).select().single()
   }
+
+  return first
+}
+
+export function useRetrySlideExtraction() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: async ({
+      projectId: _projectId,
+      storyboardId: _storyboardId,
+      storagePath,
+      slideId,
+      slideNum,
+    }: {
+      projectId: string
+      storyboardId: string
+      storagePath: string
+      slideId: string
+      slideNum: number
+    }): Promise<Slide> => {
+      const buffer = await downloadPptx(storagePath)
+      const parsed = await parseSingleSlide(buffer, slideNum)
+      const updates = prepareSlideUpdateForDb(parsedToSlideUpdate(parsed))
+
+      const { data, error } = await updateSlideRow(slideId, updates)
+
+      if (error) throw error
+      return normalizeSlide(data)
+    },
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({ queryKey: [...slidesQueryKey, variables.storyboardId] })
+    },
+  })
 }
 
 export function useBulkUpdateSlides() {
@@ -160,16 +253,14 @@ export function useBulkUpdateSlides() {
       const results: Slide[] = []
 
       for (const slide of slides) {
-        const { data, error } = await supabase
-          .from('slides')
-          .update({
-            slide_type: slide.slide_type,
-            screen_num: slide.screen_num,
-            screen_text: serializeScreenTextForDb(slide.screen_text),
-          })
-          .eq('id', slide.id)
-          .select()
-          .single()
+        const { data, error } = await updateSlideRow(slide.id, {
+          slide_type: slide.slide_type,
+          screen_num: slide.screen_num,
+          screen_text: serializeScreenTextForDb(slide.screen_text),
+          narration: slide.narration,
+          extraction_status: slide.extraction_status ?? 'ok',
+          extraction_error: slide.extraction_error,
+        })
 
         if (error) throw error
         results.push(normalizeSlide(data))
@@ -196,12 +287,7 @@ export function useUpdateSlide() {
       storyboardId: string
       updates: SlideUpdate
     }): Promise<Slide> => {
-      const { data, error } = await supabase
-        .from('slides')
-        .update(prepareSlideUpdateForDb(updates))
-        .eq('id', id)
-        .select()
-        .single()
+      const { data, error } = await updateSlideRow(id, prepareSlideUpdateForDb(updates))
 
       if (error) throw error
       return normalizeSlide(data)
@@ -227,14 +313,14 @@ export function useCompleteExtraction() {
       slides: Slide[]
     }): Promise<void> => {
       for (const slide of slides) {
-        const { error } = await supabase
-          .from('slides')
-          .update({
-            slide_type: slide.slide_type,
-            screen_num: slide.screen_num,
-            screen_text: serializeScreenTextForDb(slide.screen_text),
-          })
-          .eq('id', slide.id)
+        const { error } = await updateSlideRow(slide.id, {
+          slide_type: slide.slide_type,
+          screen_num: slide.screen_num,
+          screen_text: serializeScreenTextForDb(slide.screen_text),
+          narration: slide.narration,
+          extraction_status: slide.extraction_status ?? 'ok',
+          extraction_error: slide.extraction_error,
+        })
 
         if (error) throw error
       }

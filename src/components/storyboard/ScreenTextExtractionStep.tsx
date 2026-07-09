@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useMemo, useState, startTransition } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, startTransition, Fragment } from 'react'
 import {
-  SLIDE_TYPE_LABELS,
   formatScreenText,
   parseScreenTextInput,
 } from '../../lib/pptxParser'
@@ -13,6 +12,7 @@ import {
   useBulkUpdateSlides,
   useCompleteExtraction,
   useExtractSlides,
+  useRetrySlideExtraction,
   useSlides,
   type ParseProgress,
 } from '../../hooks/useSlides'
@@ -20,20 +20,7 @@ import { useToast } from '../../hooks/ToastProvider'
 import { ChunkProgressPanel } from '../ui/ChunkProgressPanel'
 import { Spinner } from '../ui/Spinner'
 import type { ChunkProgress } from '../../lib/chunkProgress'
-import type { Project, Slide, SlideType, Storyboard } from '../../types'
-
-const PAGE_SIZE = 20
-
-const FILTER_TYPES: Array<{ value: SlideType | 'all'; label: string }> = [
-  { value: 'all', label: '전체' },
-  { value: 'intro', label: '인트로' },
-  { value: 'lesson', label: '레슨' },
-  { value: 'content', label: '콘텐츠' },
-  { value: 'divider', label: '간지' },
-  { value: 'quiz', label: '문제풀기' },
-  { value: 'apply', label: '적용하기' },
-  { value: 'outro', label: '아웃트로' },
-]
+import type { Project, Slide, Storyboard } from '../../types'
 
 interface ScreenTextExtractionStepProps {
   project: Project
@@ -47,25 +34,33 @@ export function ScreenTextExtractionStep({
   onStepComplete,
 }: ScreenTextExtractionStepProps) {
   const { showToast } = useToast()
-  const { data: slides = [], isLoading: slidesLoading } = useSlides(storyboard.id)
+  const { data: slides = [], isLoading: slidesLoading, isError: slidesError, error: slidesQueryError } = useSlides(storyboard.id)
   const extractSlides = useExtractSlides()
+  const retrySlideExtraction = useRetrySlideExtraction()
   const bulkUpdate = useBulkUpdateSlides()
   const completeExtraction = useCompleteExtraction()
 
   const [localSlides, setLocalSlides] = useState<Slide[]>([])
-  const [typeFilter, setTypeFilter] = useState<SlideType | 'all'>('all')
+  const [retryingSlideId, setRetryingSlideId] = useState<string | null>(null)
   const [autoExtractAttempted, setAutoExtractAttempted] = useState(false)
-  const [page, setPage] = useState(0)
+  const [activeSlideNum, setActiveSlideNum] = useState<number | null>(null)
   const [extractProgress, setExtractProgress] = useState<ParseProgress | null>(null)
+  const [extractError, setExtractError] = useState<string | null>(null)
+  const rowRefs = useRef<Map<number, HTMLTableRowElement>>(new Map())
+  const navButtonRefs = useRef<Map<number, HTMLButtonElement>>(new Map())
 
   useEffect(() => {
     if (slides.length > 0) {
       startTransition(() => {
         setLocalSlides(slides)
-        setPage(0)
       })
     }
   }, [slides])
+
+  const failedCount = useMemo(
+    () => localSlides.filter((s) => s.extraction_status === 'failed').length,
+    [localSlides],
+  )
 
   const runExtraction = useCallback(async () => {
     if (!storyboard.source_pptx_url) {
@@ -75,6 +70,7 @@ export function ScreenTextExtractionStep({
 
     try {
       setExtractProgress(null)
+      setExtractError(null)
       const result = await extractSlides.mutateAsync({
         projectId: project.id,
         storyboardId: storyboard.id,
@@ -83,15 +79,50 @@ export function ScreenTextExtractionStep({
       })
       startTransition(() => {
         setLocalSlides(result)
-        setPage(0)
       })
-      showToast('화면 텍스트 추출이 완료되었습니다.', 'success')
+      const failed = result.filter((s) => s.extraction_status === 'failed').length
+      if (failed > 0) {
+        showToast(
+          `추출 완료 — ${result.length}장 중 ${failed}장 실패. 실패 슬라이드는 다시 시도하거나 다음 단계로 진행할 수 있습니다.`,
+          'info',
+        )
+      } else {
+        showToast(`${result.length}장 슬라이드 추출이 완료되었습니다.`, 'success')
+      }
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'PPTX 추출에 실패했습니다.', 'error')
+      const message = err instanceof Error ? err.message : 'PPTX 추출에 실패했습니다.'
+      setExtractError(message)
+      setAutoExtractAttempted(false)
+      showToast(message, 'error')
     } finally {
       setExtractProgress(null)
     }
   }, [extractSlides, project.id, storyboard.id, storyboard.source_pptx_url, showToast])
+
+  const handleRetrySlide = async (slide: Slide) => {
+    if (!storyboard.source_pptx_url) return
+
+    setRetryingSlideId(slide.id)
+    try {
+      const updated = await retrySlideExtraction.mutateAsync({
+        projectId: project.id,
+        storyboardId: storyboard.id,
+        storagePath: storyboard.source_pptx_url,
+        slideId: slide.id,
+        slideNum: slide.slide_num,
+      })
+      setLocalSlides((prev) => prev.map((s) => (s.id === updated.id ? updated : s)))
+      if (updated.extraction_status === 'failed') {
+        showToast(`슬라이드 ${slide.slide_num} 추출에 실패했습니다.`, 'error')
+      } else {
+        showToast(`슬라이드 ${slide.slide_num} 추출을 다시 완료했습니다.`, 'success')
+      }
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '슬라이드 재추출에 실패했습니다.', 'error')
+    } finally {
+      setRetryingSlideId(null)
+    }
+  }
 
   useEffect(() => {
     if (
@@ -118,24 +149,51 @@ export function ScreenTextExtractionStep({
     [localSlides, storyboard.manuscript_text],
   )
 
-  const filteredSlides = useMemo(() => {
-    if (typeFilter === 'all') return localSlides
-    return localSlides.filter((s) => s.slide_type === typeFilter)
-  }, [localSlides, typeFilter])
+  const scrollToSlide = useCallback((slideNum: number) => {
+    rowRefs.current.get(slideNum)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    navButtonRefs.current.get(slideNum)?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'nearest',
+      inline: 'center',
+    })
+    setActiveSlideNum(slideNum)
+  }, [])
 
-  const totalPages = Math.max(1, Math.ceil(filteredSlides.length / PAGE_SIZE))
-  const pagedSlides = useMemo(() => {
-    const safePage = Math.min(page, totalPages - 1)
-    const start = safePage * PAGE_SIZE
-    return filteredSlides.slice(start, start + PAGE_SIZE)
-  }, [filteredSlides, page, totalPages])
+  useEffect(() => {
+    if (localSlides.length === 0) return
 
-  const updateLocalSlide = (id: string, field: 'screen_text' | 'screen_num', value: string) => {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((e) => e.isIntersecting)
+          .sort((a, b) => b.intersectionRatio - a.intersectionRatio)
+        const top = visible[0]?.target.getAttribute('data-slide-num')
+        if (top) setActiveSlideNum(parseInt(top, 10))
+      },
+      { rootMargin: '-80px 0px -40% 0px', threshold: [0, 0.25, 0.5, 0.75, 1] },
+    )
+
+    for (const slide of localSlides) {
+      const row = rowRefs.current.get(slide.slide_num)
+      if (row) observer.observe(row)
+    }
+
+    return () => observer.disconnect()
+  }, [localSlides])
+
+  const updateLocalSlide = (
+    id: string,
+    field: 'screen_text' | 'screen_num' | 'narration',
+    value: string,
+  ) => {
     setLocalSlides((prev) =>
       prev.map((slide) => {
         if (slide.id !== id) return slide
         if (field === 'screen_text') {
           return { ...slide, screen_text: parseScreenTextInput(value, slide.screen_text) }
+        }
+        if (field === 'narration') {
+          return { ...slide, narration: value || null }
         }
         return { ...slide, screen_num: value || null }
       }),
@@ -152,13 +210,20 @@ export function ScreenTextExtractionStep({
   }
 
   const handleComplete = async () => {
+    if (failedCount > 0) {
+      const proceed = window.confirm(
+        `추출 실패 슬라이드가 ${failedCount}장 있습니다. 그래도 추출 완료 후 다음 단계로 진행하시겠습니까?`,
+      )
+      if (!proceed) return
+    }
+
     try {
       await completeExtraction.mutateAsync({
         projectId: project.id,
         storyboardId: storyboard.id,
         slides: localSlides,
       })
-      showToast('추출이 완료되었습니다. 영어 번역 단계로 진행할 수 있습니다.', 'success')
+      showToast('추출이 완료되었습니다. 다음 단계로 진행할 수 있습니다.', 'success')
       onStepComplete?.()
     } catch (err) {
       showToast(err instanceof Error ? err.message : '추출 완료 처리에 실패했습니다.', 'error')
@@ -167,7 +232,7 @@ export function ScreenTextExtractionStep({
 
   const handleDownloadXlsx = () => {
     const safeTitle = storyboard.title.replace(/[\\/:*?"<>|]/g, '_')
-    downloadExtractionXlsx(localSlides, `${safeTitle}_화면텍스트.xlsx`)
+    downloadExtractionXlsx(localSlides, `${safeTitle}_추출.xlsx`)
   }
 
   const isExtracting = extractSlides.isPending
@@ -179,7 +244,11 @@ export function ScreenTextExtractionStep({
         percent: Math.round((extractProgress.current / Math.max(extractProgress.total, 1)) * 100),
       }
     : null
-  const isBusy = isExtracting || bulkUpdate.isPending || completeExtraction.isPending
+  const isBusy =
+    isExtracting ||
+    bulkUpdate.isPending ||
+    completeExtraction.isPending ||
+    retrySlideExtraction.isPending
   const isExtracted = storyboard.status !== 'uploaded'
 
   return (
@@ -188,7 +257,8 @@ export function ScreenTextExtractionStep({
         <div>
           <h3 className="nb-step-title">Step 1. 화면 텍스트 추출</h3>
           <p className="nb-step-desc">
-            PPTX에서 화면에 표시되는 텍스트만 추출합니다. (나레이션 제외)
+            PPTX 전체 슬라이드(1번부터)에서 화면번호·화면 텍스트·나레이션을 추출합니다. 화면설명
+            영역은 제외합니다.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -202,7 +272,7 @@ export function ScreenTextExtractionStep({
             className="nb-btn-secondary"
           >
             {isExtracting && <Spinner />}
-            {isExtracting ? '추출 중...' : '다시 추출'}
+            {isExtracting ? '추출 중...' : '전체 다시 추출'}
           </button>
           <button
             type="button"
@@ -232,11 +302,22 @@ export function ScreenTextExtractionStep({
         </div>
       </div>
 
+      {localSlides.length > 0 && (
+        <p className="text-sm text-gray-600">
+          총 {localSlides.length}장
+          {failedCount > 0 && (
+            <span className="ml-2 font-medium text-red-600">
+              · 추출 실패 {failedCount}장 (붉은색 행 — 개별 재시도 가능)
+            </span>
+          )}
+        </p>
+      )}
+
       {isExtracting && (
         <ChunkProgressPanel
           title="PPTX 추출"
           progress={extractChunkProgress}
-          hint="화면 텍스트만 추출하여 저장합니다."
+          hint="전체 슬라이드를 순서대로 분석합니다."
         />
       )}
 
@@ -292,67 +373,174 @@ export function ScreenTextExtractionStep({
         </div>
       )}
 
-      <div className="flex flex-wrap gap-2">
-        {FILTER_TYPES.map((filter) => (
-          <button
-            key={filter.value}
-            type="button"
-            onClick={() => setTypeFilter(filter.value)}
-            className={`nb-filter-pill ${
-              typeFilter === filter.value ? 'nb-filter-pill--active' : 'nb-filter-pill--inactive'
-            }`}
-          >
-            {filter.label}
-          </button>
-        ))}
-      </div>
-
       {slidesLoading || isExtracting ? (
         <div className="nb-empty-state">
           <Spinner className="text-gray-400" />
         </div>
       ) : localSlides.length === 0 ? (
-        <div className="nb-empty-state">
+        <div className="nb-empty-state space-y-3">
           <p className="text-sm text-gray-500">추출된 슬라이드가 없습니다.</p>
+          {(extractError || slidesError) && (
+            <div className="nb-alert nb-alert--warning mx-auto max-w-xl text-left text-sm">
+              <p className="font-medium text-red-700">추출 오류</p>
+              <p className="mt-1 text-gray-700">
+                {extractError ??
+                  (slidesQueryError instanceof Error
+                    ? slidesQueryError.message
+                    : '슬라이드 목록을 불러오지 못했습니다.')}
+              </p>
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              setAutoExtractAttempted(true)
+              runExtraction()
+            }}
+            disabled={isBusy || !storyboard.source_pptx_url}
+            className="nb-btn-primary"
+          >
+            {isExtracting && <Spinner className="text-white" />}
+            {isExtracting ? '추출 중...' : 'PPTX 추출 시작'}
+          </button>
         </div>
       ) : (
-        <div className="nb-card nb-h-scroll overflow-hidden">
-          <table className="nb-table">
-            <thead>
-              <tr>
-                <th>슬라이드</th>
-                <th>유형</th>
-                <th>화면번호</th>
-                <th className="min-w-[320px]">화면텍스트 (한국어)</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pagedSlides.map((slide) => (
-                <tr key={slide.id}>
-                  <td className="font-medium">{slide.slide_num}</td>
-                  <td>
-                    <span className="nb-badge">{SLIDE_TYPE_LABELS[slide.slide_type]}</span>
-                  </td>
-                  <td>
-                    <input
-                      type="text"
-                      value={slide.screen_num ?? ''}
-                      onChange={(e) => updateLocalSlide(slide.id, 'screen_num', e.target.value)}
-                      className="nb-input w-full min-w-[80px] text-xs"
-                    />
-                  </td>
-                  <td>
-                    <textarea
-                      value={formatScreenText(slide.screen_text)}
-                      onChange={(e) => updateLocalSlide(slide.id, 'screen_text', e.target.value)}
-                      rows={3}
-                      className="nb-textarea w-full text-xs"
-                    />
-                  </td>
+        <div className="relative pb-14">
+          <div className="nb-card nb-h-scroll overflow-hidden">
+            <table className="nb-table">
+              <thead>
+                <tr>
+                  <th className="w-16">슬라이드</th>
+                  <th className="w-24">화면번호</th>
+                  <th className="min-w-[280px]">화면텍스트 (한국어)</th>
+                  <th className="min-w-[280px]">나레이션 (한국어)</th>
+                  <th className="w-24">재추출</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {localSlides.map((slide) => {
+                  const isFailed = slide.extraction_status === 'failed'
+                  return (
+                    <tr
+                      key={slide.id}
+                      ref={(el) => {
+                        if (el) rowRefs.current.set(slide.slide_num, el)
+                        else rowRefs.current.delete(slide.slide_num)
+                      }}
+                      data-slide-num={slide.slide_num}
+                      className={[
+                        'scroll-mt-20',
+                        isFailed
+                          ? 'bg-red-50'
+                          : activeSlideNum === slide.slide_num
+                            ? 'bg-blue-50/60'
+                            : '',
+                      ]
+                        .filter(Boolean)
+                        .join(' ')}
+                      title={isFailed ? slide.extraction_error ?? '추출 실패' : undefined}
+                    >
+                      <td className="font-medium">
+                        {slide.slide_num}
+                        {isFailed && (
+                          <span className="mt-0.5 block text-xs font-normal text-red-600">
+                            실패
+                          </span>
+                        )}
+                      </td>
+                      <td>
+                        <input
+                          type="text"
+                          value={slide.screen_num ?? ''}
+                          onChange={(e) =>
+                            updateLocalSlide(slide.id, 'screen_num', e.target.value)
+                          }
+                          className="nb-input w-full min-w-[72px] text-xs"
+                        />
+                      </td>
+                      <td>
+                        <textarea
+                          value={formatScreenText(slide.screen_text)}
+                          onChange={(e) =>
+                            updateLocalSlide(slide.id, 'screen_text', e.target.value)
+                          }
+                          rows={4}
+                          className={`nb-textarea w-full text-xs ${isFailed && !formatScreenText(slide.screen_text) ? 'border-red-300' : ''}`}
+                          placeholder={isFailed ? '추출되지 않음' : undefined}
+                        />
+                      </td>
+                      <td>
+                        <textarea
+                          value={slide.narration ?? ''}
+                          onChange={(e) =>
+                            updateLocalSlide(slide.id, 'narration', e.target.value)
+                          }
+                          rows={4}
+                          className="nb-textarea w-full text-xs"
+                          placeholder="나레이션 없음"
+                        />
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          onClick={() => handleRetrySlide(slide)}
+                          disabled={isBusy || retryingSlideId === slide.id}
+                          className="nb-btn-secondary text-xs whitespace-nowrap"
+                        >
+                          {retryingSlideId === slide.id ? <Spinner /> : '다시 추출'}
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <nav
+            aria-label="슬라이드 이동"
+            className="fixed inset-x-0 bottom-0 z-20 border-t border-gray-200 bg-white/95 shadow-[0_-4px_12px_rgba(0,0,0,0.06)] backdrop-blur-sm"
+          >
+            <div className="nb-h-scroll mx-auto flex max-w-[100vw] items-center gap-1 whitespace-nowrap px-4 py-2.5">
+              {localSlides.map((slide, index) => {
+                const isFailed = slide.extraction_status === 'failed'
+                const isActive = activeSlideNum === slide.slide_num
+                return (
+                  <Fragment key={slide.id}>
+                    {index > 0 && (
+                      <span className="select-none text-gray-300" aria-hidden>
+                        -
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      ref={(el) => {
+                        if (el) navButtonRefs.current.set(slide.slide_num, el)
+                        else navButtonRefs.current.delete(slide.slide_num)
+                      }}
+                      onClick={() => scrollToSlide(slide.slide_num)}
+                      title={
+                        isFailed
+                          ? `슬라이드 ${slide.slide_num} — 추출 실패`
+                          : `슬라이드 ${slide.slide_num}로 이동`
+                      }
+                      className={[
+                        'min-w-[1.75rem] rounded px-1.5 py-0.5 text-xs font-medium transition-colors',
+                        isFailed
+                          ? 'text-red-600 hover:bg-red-50'
+                          : 'text-gray-600 hover:bg-gray-100',
+                        isActive ? 'bg-blue-100 font-semibold text-blue-700 ring-1 ring-blue-300' : '',
+                      ]
+                        .filter(Boolean)
+                        .join(' ')}
+                    >
+                      {slide.slide_num}
+                    </button>
+                  </Fragment>
+                )
+              })}
+            </div>
+          </nav>
         </div>
       )}
 

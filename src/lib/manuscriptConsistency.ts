@@ -1,4 +1,4 @@
-import { formatScreenText } from './pptxParser'
+import { formatScreenText, isSyncMarkerOnly } from './pptxParser'
 import type { Slide } from '../types'
 
 export type ConsistencyStatus = 'match' | 'partial' | 'missing'
@@ -19,6 +19,23 @@ export interface ConsistencySummary {
   partial: number
   missing: number
   items: ScreenTextConsistencyItem[]
+}
+
+function shouldSkipConsistencyLine(text: string): boolean {
+  const t = text.trim()
+  if (!t) return true
+  if (isSyncMarkerOnly(t)) return true
+  if (/^#\d+\b/.test(t) && t.length < 30) return true
+  if (/^출처\s*:/.test(t)) return true
+  if (/^(영상|이미지|사진|캡처|동영상)/.test(t)) return true
+  return false
+}
+
+function isLearningSlide(slide: Slide): boolean {
+  if (slide.slide_type === 'intro' || slide.slide_type === 'divider' || slide.slide_type === 'outro') {
+    return false
+  }
+  return slide.slide_num >= 4
 }
 
 function normalizeForCompare(text: string): string {
@@ -95,13 +112,17 @@ export function checkScreenTextConsistency(
   }
 
   for (const slide of slides) {
-    if (slide.slide_type === 'guide') continue
+    if (!isLearningSlide(slide)) continue
 
     const screenText = formatScreenText(slide.screen_text).trim()
     if (!screenText) continue
 
-    const lines = screenText.split('\n').map((line) => line.trim()).filter(Boolean)
-    const texts = lines.length > 0 ? lines : [screenText]
+    const lines = screenText
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => !shouldSkipConsistencyLine(line))
+
+    const texts = lines.length > 0 ? lines : []
 
     for (const text of texts) {
       const result = checkTextAgainstManuscript(text, manuscriptNorm)

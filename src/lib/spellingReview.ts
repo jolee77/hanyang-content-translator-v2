@@ -1,9 +1,10 @@
 import type { Slide, SpellingIssue, SpellingResult } from '../types'
 import { formatScreenText, normalizeScreenText } from './pptxParser'
+import { isNewlineLayoutSpellingDifference, isSpellingContentEqual } from './spellingNormalize'
 
 export type SpellableField = { field_key: string; text: string }
 
-export type SpellingItemStatus = 'pending' | 'no_change' | 'applied' | 'skipped'
+export type SpellingItemStatus = 'pending' | 'no_change' | 'approved' | 'applied' | 'skipped'
 
 export type SlideSpellingCoverage =
   | 'pending_review'
@@ -42,18 +43,50 @@ export function buildSpellableFields(slide: Slide): SpellableField[] {
 }
 
 export function hasSpellingTextChanges(result: SpellingResult): boolean {
-  return result.original.trim() !== result.suggestion.trim()
+  if (isSpellingContentEqual(result.original, result.suggestion)) return false
+  if (isNewlineLayoutSpellingDifference(result.original, result.suggestion, result.issues ?? [])) {
+    return false
+  }
+  return true
 }
 
 export function isSpellingPendingReview(result: SpellingResult): boolean {
-  return hasSpellingTextChanges(result) && !result.applied && !result.skipped
+  return (
+    hasSpellingTextChanges(result) &&
+    !result.applied &&
+    !result.skipped &&
+    !result.approved
+  )
+}
+
+/** 검토 승인됨 — 슬라이드·PPTX 반영 대기 */
+export function isSpellingApprovedForApply(result: SpellingResult): boolean {
+  return (
+    hasSpellingTextChanges(result) &&
+    result.approved &&
+    !result.applied &&
+    !result.skipped
+  )
 }
 
 export function getSpellingItemStatus(result: SpellingResult): SpellingItemStatus {
   if (result.applied) return 'applied'
   if (result.skipped) return 'skipped'
+  if (result.approved) return 'approved'
   if (hasSpellingTextChanges(result)) return 'pending'
   return 'no_change'
+}
+
+export function isSpellingReviewSettled(results: SpellingResult[]): boolean {
+  return results
+    .filter(hasSpellingTextChanges)
+    .every((result) => result.applied || result.skipped || result.approved)
+}
+
+export function isSpellingApplySettled(results: SpellingResult[]): boolean {
+  return results
+    .filter((result) => result.approved && !result.skipped)
+    .every((result) => result.applied)
 }
 
 export function issueTypeLabel(type: string): string {
@@ -77,7 +110,10 @@ export function formatSpellingReviewReason(result: SpellingResult): string {
     return '수정 불필요 — 맞춤법·띄어쓰기·문법상 문제가 발견되지 않았습니다.'
   }
   if (status === 'applied') {
-    return '검토 완료 — 수정안을 슬라이드에 반영했습니다.'
+    return '슬라이드 반영 완료 — 수정안이 데이터에 저장되었습니다. PPTX보내기 시 반영됩니다.'
+  }
+  if (status === 'approved') {
+    return '검토 승인 — 아래 「슬라이드 반영」에서 선택 후 반영할 수 있습니다.'
   }
   if (status === 'skipped') {
     return '검토 완료 — 수정안을 적용하지 않기로 했습니다.'
@@ -145,6 +181,8 @@ export function spellingItemBoxClass(status: SpellingItemStatus): string {
   switch (status) {
     case 'pending':
       return 'border-l-4 border-amber-500 bg-amber-50/90 ring-1 ring-amber-200/80'
+    case 'approved':
+      return 'border-l-4 border-violet-500 bg-violet-50/80 ring-1 ring-violet-200/80'
     case 'applied':
       return 'border-l-4 border-emerald-500 bg-emerald-50/80'
     case 'skipped':

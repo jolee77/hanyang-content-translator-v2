@@ -1,3 +1,5 @@
+import { isNewlineLayoutSpellingDifference, isSpellingContentEqual } from './spellingNormalize'
+
 export interface TextDiffSegment {
   text: string
   changed: boolean
@@ -15,6 +17,8 @@ export function detectSpellingChangeKind(
   suggestion: string,
 ): SpellingChangeKind {
   if (original === suggestion) return 'none'
+  if (isSpellingContentEqual(original, suggestion)) return 'none'
+  if (isNewlineLayoutSpellingDifference(original, suggestion)) return 'none'
   if (original.replace(/\s/g, '') === suggestion.replace(/\s/g, '')) return 'spacing'
   return 'text'
 }

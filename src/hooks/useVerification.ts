@@ -198,6 +198,18 @@ export function isVerificationResolved(
   return applyStatus === 'applied' || applyStatus === 'skipped'
 }
 
+export function isVerificationPendingReview(verification: Verification): boolean {
+  return (
+    needsVerificationReview(verification) &&
+    !isVerificationResolved(verification, verification.apply_status)
+  )
+}
+
+export function isVerificationReviewSettled(verifications: Verification[]): boolean {
+  if (verifications.length === 0) return false
+  return verifications.every((v) => isVerificationResolved(v, v.apply_status))
+}
+
 export function matchStatusLabel(status: MatchStatus): string {
   switch (status) {
     case 'ok':

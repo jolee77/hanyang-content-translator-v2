@@ -22,7 +22,7 @@ export function ProgressBar({ progress, label, indeterminate }: ProgressBarProps
         <p className="mt-1 text-right text-xs text-blue-600">{clamped}%</p>
       )}
       {indeterminate && (
-        <p className="mt-1 text-right text-xs text-blue-600">처리 중…</p>
+        <p className="mt-1 text-right text-xs text-blue-600">AI 처리 중…</p>
       )}
     </div>
   )

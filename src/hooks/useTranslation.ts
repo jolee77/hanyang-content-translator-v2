@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { translateSlides } from '../lib/claudeApi'
 import { type ChunkProgress, mergeChunkProgress } from '../lib/chunkProgress'
+import { fetchTranslationsForSlides } from '../lib/supabaseChunks'
 import {
   estimateKoDurationSeconds,
   estimateTargetDurationSeconds,
@@ -21,15 +22,7 @@ export function useStoryboardTranslations(
     queryKey: [...translationsQueryKey, 'storyboard', storyboardId],
     queryFn: async (): Promise<Translation[]> => {
       if (slideIds.length === 0) return []
-
-      const { data, error } = await supabase
-        .from('translations')
-        .select('*')
-        .in('slide_id', slideIds)
-        .order('created_at', { ascending: true })
-
-      if (error) throw error
-      return data
+      return fetchTranslationsForSlides(slideIds)
     },
     enabled: !!storyboardId && slideIds.length > 0,
   })

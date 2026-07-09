@@ -417,6 +417,105 @@ function processSlideXmlReplaceEnglish(xml: string, slideNum: number, translatio
   return new XMLSerializer().serializeToString(doc)
 }
 
+function replaceKoreanTextInShape(shape: Element, doc: Document, koText: string, fontSz: number): void {
+  const lines = koText.split('\n')
+  const paragraphs = lines
+    .map((line) => `<a:p><a:pPr/>${buildTextRun(line, 'ko-KR', fontSz, '000000')}</a:p>`)
+    .join('')
+
+  const txBodyXml = `<p:txBody xmlns:p="${P_NS}" xmlns:a="${A_NS}"><a:bodyPr wrap="square" rtlCol="0"><a:spAutoFit/></a:bodyPr><a:lstStyle/>${paragraphs}</p:txBody>`
+  const oldTxBody = firstChildByLocalName(shape, 'txBody')
+  const txBodyDoc = new DOMParser().parseFromString(txBodyXml, 'application/xml')
+  const newTxBody = txBodyDoc.documentElement
+  const imported = doc.importNode(newTxBody, true)
+
+  if (oldTxBody) {
+    shape.replaceChild(imported, oldTxBody)
+  } else {
+    shape.appendChild(imported)
+  }
+}
+
+function processSlideXmlApplySpelling(
+  xml: string,
+  replacements: Array<{ original: string; suggestion: string }>,
+): string {
+  if (replacements.length === 0) return xml
+
+  const doc = new DOMParser().parseFromString(xml, 'application/xml')
+  const cSld = firstChildByLocalName(doc.documentElement, 'cSld')
+  const spTree = cSld
+    ? firstChildByLocalName(cSld, 'spTree')
+    : firstChildByLocalName(doc.documentElement, 'spTree')
+  if (!spTree) return xml
+
+  const shapes = collectTextShapes(spTree)
+  const usedKeys = new Set<string>()
+
+  for (const info of shapes) {
+    const trimmed = info.text.trim()
+    if (!trimmed) continue
+    if (isHashNumberOnly(trimmed)) continue
+
+    const isNarration = isNarrationBox(info.x, info.y)
+    const isScreen = isScreenTextBox(info.x, info.y, info.w)
+    if (!isNarration && !isScreen) continue
+
+    const match = replacements.find((r) => {
+      const key = `${r.original.trim()}→${r.suggestion.trim()}`
+      if (usedKeys.has(key)) return false
+      return r.original.trim() === trimmed
+    })
+
+    if (!match?.suggestion.trim()) continue
+
+    usedKeys.add(`${match.original.trim()}→${match.suggestion.trim()}`)
+    replaceKoreanTextInShape(info.shape, doc, match.suggestion.trim(), info.fontSize ?? 1200)
+  }
+
+  return new XMLSerializer().serializeToString(doc)
+}
+
+export async function generateKoreanCorrectedPptx(
+  sourceFile: File,
+  slides: Array<{ id: string; slide_num: number }>,
+  appliedResults: Array<{ slide_id: string; original: string; suggestion: string; applied: boolean }>,
+): Promise<Blob> {
+  const buffer = await sourceFile.arrayBuffer()
+  const zip = await JSZip.loadAsync(buffer)
+
+  const slidePaths = sortSlidePaths(
+    Object.keys(zip.files).filter((path) => /^ppt\/slides\/slide\d+\.xml$/.test(path)),
+  )
+
+  const resultsBySlideId = new Map<string, Array<{ original: string; suggestion: string }>>()
+  for (const result of appliedResults) {
+    if (!result.applied) continue
+    const list = resultsBySlideId.get(result.slide_id) ?? []
+    list.push({ original: result.original, suggestion: result.suggestion })
+    resultsBySlideId.set(result.slide_id, list)
+  }
+
+  for (let i = 0; i < slidePaths.length; i++) {
+    const slideNum = i + 1
+    const slideId = slides.find((s) => s.slide_num === slideNum)?.id
+    if (!slideId) continue
+
+    const replacements = resultsBySlideId.get(slideId) ?? []
+    if (replacements.length === 0) continue
+
+    const path = slidePaths[i]
+    const xml = await zip.file(path)!.async('string')
+    const updated = processSlideXmlApplySpelling(xml, replacements)
+    zip.file(path, updated)
+  }
+
+  return zip.generateAsync({
+    type: 'blob',
+    mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  })
+}
+
 export async function generateEnglishScreenPptx(
   sourceFile: File,
   translations: Translation[],

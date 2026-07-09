@@ -6,6 +6,7 @@ import {
   hasSpellingTextChanges,
   normalizeSpellingIssues,
 } from '../lib/spellingReview'
+import { reconcileSpellingSuggestion } from '../lib/spellingNormalize'
 import { supabase } from '../lib/supabase'
 import type { Slide, SpellingResult } from '../types'
 import { useAuth } from './useAuth'
@@ -14,11 +15,20 @@ const spellingQueryKey = ['spelling_results'] as const
 /** Edge Function spelling-check BATCH_SIZE와 동일 */
 const SPELLING_BATCH_SIZE = 10
 
-function normalizeSpellingResult(row: SpellingResult & { issues?: unknown }): SpellingResult {
+function normalizeSpellingResult(row: SpellingResult & { issues?: unknown; approved?: boolean }): SpellingResult {
+  const issues = normalizeSpellingIssues(row.issues)
+  const { suggestion, issues: reconciledIssues } = reconcileSpellingSuggestion(
+    row.original,
+    row.suggestion,
+    issues,
+  )
+
   return {
     ...row,
+    suggestion,
     skipped: row.skipped ?? false,
-    issues: normalizeSpellingIssues(row.issues),
+    approved: row.approved ?? false,
+    issues: reconciledIssues,
   }
 }
 
@@ -147,6 +157,56 @@ export function useRunSpellingCheck() {
   })
 }
 
+/** v2 스토리보드 Step 2 — 화면텍스트 맞춤법만 검사 */
+export function useRunScreenTextSpellingCheck() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: async ({
+      projectId,
+      storyboardId,
+      slideIds,
+      onChunkProgress,
+    }: {
+      projectId: string
+      storyboardId: string
+      slideIds: string[]
+      onChunkProgress?: (progress: ChunkProgress) => void
+    }): Promise<void> => {
+      if (slideIds.length === 0) {
+        throw new Error('검사할 슬라이드가 없습니다.')
+      }
+
+      const batches: string[][] = []
+      for (let i = 0; i < slideIds.length; i += SPELLING_BATCH_SIZE) {
+        batches.push(slideIds.slice(i, i + SPELLING_BATCH_SIZE))
+      }
+
+      onChunkProgress?.(mergeChunkProgress(0, batches.length, '맞춤법 검사 준비'))
+
+      for (let i = 0; i < batches.length; i++) {
+        onChunkProgress?.(mergeChunkProgress(i + 1, batches.length, '맞춤법 AI 검사'))
+        await spellingCheck(projectId, batches[i], {
+          storyboardId,
+          screenTextOnly: true,
+          resetResults: i === 0,
+          finalize: i === batches.length - 1,
+        })
+      }
+
+      onChunkProgress?.(mergeChunkProgress(batches.length, batches.length, '맞춤법 검사 완료'))
+    },
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['storyboards'] })
+      queryClient.invalidateQueries({
+        queryKey: ['storyboards', 'detail', variables.storyboardId],
+      })
+      queryClient.invalidateQueries({ queryKey: ['spelling_results'] })
+      queryClient.invalidateQueries({ queryKey: ['slides', variables.storyboardId] })
+    },
+  })
+}
+
 async function applySpellingResultToSlide(
   result: SpellingResult,
   slide: Slide,
@@ -167,7 +227,7 @@ async function applySpellingResultToSlide(
 
   const { error: resultError } = await supabase
     .from('spelling_results')
-    .update({ applied: true, skipped: false })
+    .update({ applied: true, skipped: false, approved: true })
     .eq('id', result.id)
 
   if (resultError) throw resultError
@@ -198,12 +258,17 @@ export function useApplySpellingFix() {
       result: SpellingResult
       slide: Slide
       projectId: string
+      storyboardId?: string
     }): Promise<void> => {
       await applySpellingResultToSlide(result, slide, projectId, user?.id)
     },
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: [...spellingQueryKey, variables.projectId] })
-      queryClient.invalidateQueries({ queryKey: ['slides', variables.projectId] })
+      if (variables.storyboardId) {
+        queryClient.invalidateQueries({ queryKey: ['slides', variables.storyboardId] })
+      } else {
+        queryClient.invalidateQueries({ queryKey: ['slides'] })
+      }
     },
   })
 }
@@ -221,6 +286,7 @@ export function useBulkApplySpellingFix() {
       results: SpellingResult[]
       slides: Slide[]
       projectId: string
+      storyboardId?: string
     }): Promise<number> => {
       const slideMap = new Map(slides.map((s) => [s.id, s]))
       let applied = 0
@@ -236,7 +302,11 @@ export function useBulkApplySpellingFix() {
     },
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: [...spellingQueryKey, variables.projectId] })
-      queryClient.invalidateQueries({ queryKey: ['slides', variables.projectId] })
+      if (variables.storyboardId) {
+        queryClient.invalidateQueries({ queryKey: ['slides', variables.storyboardId] })
+      } else {
+        queryClient.invalidateQueries({ queryKey: ['slides'] })
+      }
     },
   })
 }
@@ -256,8 +326,61 @@ export function useSkipSpellingFix() {
 
       const { error } = await supabase
         .from('spelling_results')
-        .update({ skipped: true })
+        .update({ skipped: true, approved: false })
         .in('id', resultIds)
+
+      if (error) throw error
+    },
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({ queryKey: [...spellingQueryKey, variables.projectId] })
+    },
+  })
+}
+
+export function useApproveSpellingFix() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: async ({
+      resultIds,
+      projectId: _projectId,
+    }: {
+      resultIds: string[]
+      projectId: string
+    }): Promise<void> => {
+      if (resultIds.length === 0) return
+
+      const { error } = await supabase
+        .from('spelling_results')
+        .update({ approved: true, skipped: false })
+        .in('id', resultIds)
+
+      if (error) throw error
+    },
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({ queryKey: [...spellingQueryKey, variables.projectId] })
+    },
+  })
+}
+
+export function useRevokeSpellingApproval() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: async ({
+      resultIds,
+      projectId: _projectId,
+    }: {
+      resultIds: string[]
+      projectId: string
+    }): Promise<void> => {
+      if (resultIds.length === 0) return
+
+      const { error } = await supabase
+        .from('spelling_results')
+        .update({ approved: false })
+        .in('id', resultIds)
+        .eq('applied', false)
 
       if (error) throw error
     },
@@ -304,13 +427,7 @@ export function hasSpellingChanges(result: SpellingResult): boolean {
   return hasSpellingTextChanges(result)
 }
 
-export { isSpellingPendingReview } from '../lib/spellingReview'
-
-export function isSpellingReviewSettled(results: SpellingResult[]): boolean {
-  return results
-    .filter(hasSpellingChanges)
-    .every((result) => result.applied || result.skipped)
-}
+export { isSpellingPendingReview, isSpellingReviewSettled, isSpellingApplySettled } from '../lib/spellingReview'
 
 export function isSpellingCheckComplete(status: string): boolean {
   return status === 'spelling_done'

@@ -38,6 +38,8 @@ export type SlideType =
   | 'lesson'
   | 'content'
 
+export type ExtractionStatus = 'ok' | 'failed'
+
 export type ExpertReviewStatus = 'pending' | 'in_progress' | 'done'
 
 export type ExpertReviewItemStatus = 'pending' | 'approved' | 'rejected' | 'reviewed'
@@ -134,6 +136,8 @@ export interface Slide {
   screen_desc: string | null
   image_nums: string | null
   narration: string | null
+  extraction_status: ExtractionStatus
+  extraction_error: string | null
   created_at: string
 }
 
@@ -146,6 +150,7 @@ export interface SpellingResult {
   suggestion: string
   applied: boolean
   skipped: boolean
+  approved: boolean
   issues: SpellingIssue[]
   created_at: string
 }

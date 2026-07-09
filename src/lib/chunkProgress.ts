@@ -3,6 +3,8 @@ export interface ChunkProgress {
   total: number
   phase: string
   percent: number
+  /** 현재 묶음 API 호출 대기 중 */
+  waiting?: boolean
 }
 
 export function chunkProgress(

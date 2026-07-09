@@ -121,6 +121,14 @@ function mergeTranslationRows(
   return rows
 }
 
+function dedupeTranslationRows(rows: TranslationInsertRow[]): TranslationInsertRow[] {
+  const map = new Map<string, TranslationInsertRow>()
+  for (const row of rows) {
+    map.set(`${row.slide_id}:${row.field}`, row)
+  }
+  return [...map.values()]
+}
+
 function buildSystemPrompt(guidelines: string | null, screenTextOnly: boolean): string {
   const base = screenTextOnly
     ? `당신은 한국어 이러닝 스토리보드의 화면 텍스트를 영어로 번역하는 전문 번역가입니다.
@@ -300,8 +308,21 @@ serve(async (req) => {
         .eq('project_id', body.project_id)
 
       if (body.storyboard_id) {
-        const slideIds = slideRows.map((slide) => slide.id)
-        const { error: resetError } = await deleteQuery.in('slide_id', slideIds)
+        const { data: storyboardSlides, error: slidesLookupError } = await serviceClient
+          .from('slides')
+          .select('id')
+          .eq('storyboard_id', body.storyboard_id)
+
+        if (slidesLookupError) {
+          throw new HttpError(500, `슬라이드 조회 실패: ${slidesLookupError.message}`)
+        }
+
+        const storyboardSlideIds = (storyboardSlides ?? []).map((slide) => slide.id)
+        if (storyboardSlideIds.length === 0) {
+          throw new HttpError(404, '스토리보드 슬라이드가 없습니다.')
+        }
+
+        const { error: resetError } = await deleteQuery.in('slide_id', storyboardSlideIds)
         if (resetError) {
           throw new HttpError(500, `기존 번역 결과 삭제 실패: ${resetError.message}`)
         }
@@ -324,7 +345,10 @@ serve(async (req) => {
     }
 
     if (rowsToInsert.length > 0) {
-      const { error: insertError } = await serviceClient.from('translations').insert(rowsToInsert)
+      const payload = dedupeTranslationRows(rowsToInsert)
+      const { error: insertError } = await serviceClient
+        .from('translations')
+        .upsert(payload, { onConflict: 'slide_id,field' })
 
       if (insertError) {
         throw new HttpError(500, `번역 결과 저장 실패: ${insertError.message}`)

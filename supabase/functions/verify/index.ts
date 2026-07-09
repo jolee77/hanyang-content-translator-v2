@@ -15,9 +15,13 @@ const BATCH_SIZE = 4
 interface VerifyRequest {
   project_id: string
   storyboard_id?: string
+  slide_ids?: string[]
   translation_ids?: string[]
   reset_results?: boolean
   finalize?: boolean
+  /** Step 2: 프로젝트/스토리보드를 verified로 올리지 않음 */
+  pipeline_review?: boolean
+  storyboard_finalize_status?: string
 }
 
 interface TranslationRow {
@@ -166,6 +170,8 @@ serve(async (req) => {
 
     if (body.translation_ids?.length) {
       query = query.in('id', body.translation_ids)
+    } else if (body.slide_ids?.length) {
+      query = query.in('slide_id', body.slide_ids)
     }
 
     const { data: translations, error: translationsError } = await query
@@ -201,16 +207,7 @@ serve(async (req) => {
 
     const translationIds = translationRows.map((row) => row.id)
 
-    if (body.reset_results) {
-      const { error: resetError } = await serviceClient
-        .from('verifications')
-        .delete()
-        .eq('project_id', body.project_id)
-
-      if (resetError) {
-        throw new HttpError(500, `기존 검증 결과 삭제 실패: ${resetError.message}`)
-      }
-    } else {
+    if (translationIds.length > 0) {
       const { error: deleteError } = await serviceClient
         .from('verifications')
         .delete()
@@ -219,6 +216,17 @@ serve(async (req) => {
 
       if (deleteError) {
         throw new HttpError(500, `기존 검증 결과 삭제 실패: ${deleteError.message}`)
+      }
+    }
+
+    if (body.reset_results && !body.storyboard_id && !body.slide_ids?.length) {
+      const { error: resetError } = await serviceClient
+        .from('verifications')
+        .delete()
+        .eq('project_id', body.project_id)
+
+      if (resetError) {
+        throw new HttpError(500, `기존 검증 결과 삭제 실패: ${resetError.message}`)
       }
     }
 
@@ -233,17 +241,25 @@ serve(async (req) => {
     }
 
     if (shouldFinalize) {
-      await updateProjectStatus(serviceClient, body.project_id, 'verified')
-      if (body.storyboard_id) {
-        await updateStoryboardStatus(serviceClient, body.storyboard_id, 'verified')
+      if (!body.pipeline_review) {
+        await updateProjectStatus(serviceClient, body.project_id, 'verified')
       }
 
-      await serviceClient.from('change_logs').insert({
-        project_id: body.project_id,
-        user_id: user.id,
-        action: 'verification_applied',
-        detail: `${rowsToInsert.length}건 역번역 검증 완료`,
-      })
+      if (body.storyboard_id) {
+        const storyboardStatus = body.pipeline_review
+          ? (body.storyboard_finalize_status ?? 'verifying')
+          : 'verified'
+        await updateStoryboardStatus(serviceClient, body.storyboard_id, storyboardStatus)
+      }
+
+      if (!body.pipeline_review) {
+        await serviceClient.from('change_logs').insert({
+          project_id: body.project_id,
+          user_id: user.id,
+          action: 'verification_applied',
+          detail: `${rowsToInsert.length}건 역번역 검증 완료`,
+        })
+      }
     }
 
     return jsonResponse({
